@@ -10,8 +10,8 @@ using System.Runtime.InteropServices;
 [assembly: AssemblyConfiguration("")]
 [assembly: AssemblyCompany("")]
 [assembly: AssemblyProduct("mb_Spotify_Plugin")]
-[assembly: AssemblyCopyright("Copyright © 2021 Zachary Cohen; maintained by corpsedbooz4321")]
-[assembly: AssemblyTrademark("copsedbooz4321")]
+[assembly: AssemblyCopyright("Copyright © 2021 Zachary Cohen, giingerr01")]
+[assembly: AssemblyTrademark("mb_Spotify_Plugin is a trademark of Zachary Cohen, giingerr01")]
 [assembly: AssemblyCulture("")]
 // Setting ComVisible to false makes the types in this assembly not visible
 // to COM components.  If you need to access a type in this assembly from
@@ -31,5 +31,5 @@ using System.Runtime.InteropServices;
 // You can specify all the values or you can default the Build and Revision Numbers
 // by using the '*' as shown below:
 // [assembly: AssemblyVersion("1.0.*")]
-[assembly: AssemblyVersion("3.4.0")]
-[assembly: AssemblyFileVersion("3.4.0")]
+[assembly: AssemblyVersion("4.0.0")]
+[assembly: AssemblyFileVersion("4.0.0")]

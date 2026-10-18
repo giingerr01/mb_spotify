@@ -33,8 +33,8 @@ namespace MusicBeePlugin
             about.Author = "zkhcohen";
             about.TargetApplication = "Spotify Plugin";
             about.Type = PluginType.PanelView;
-            about.VersionMajor = 3;
-            about.VersionMinor = 1;
+            about.VersionMajor = 4;
+            about.VersionMinor = 0;
             about.Revision = 0;
             about.MinInterfaceVersion = MinInterfaceVersion;
             about.MinApiRevision = MinApiRevision;
