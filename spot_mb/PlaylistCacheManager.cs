@@ -313,13 +313,13 @@ namespace MusicBeePlugin
 		}
 	}
 
-	public class CachedPlaylist
-	{
-		public string Id { get; set; }
-		public string Name { get; set; }
-		public int TotalTracks { get; set; }
-		public DateTime CachedAt { get; set; }
-	}
+	// public class CachedPlaylist
+	// {
+	// 	public string Id { get; set; }
+	// 	public string Name { get; set; }
+	// 	public int TotalTracks { get; set; }
+	// 	public DateTime CachedAt { get; set; }
+	// }
 
 	public class PlaylistCache
 	{
