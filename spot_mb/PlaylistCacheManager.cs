@@ -24,6 +24,7 @@ namespace MusicBeePlugin
 
 		public PlaylistCacheManager(SpotifyClient spotify)
 		{
+			//spotify client is passed in from the main plugin class, which is initialized with the access token
 			_spotify = spotify;
 			_membershipCache = new ConcurrentDictionary<(string, string), (bool, DateTime)>();
 
@@ -61,6 +62,7 @@ namespace MusicBeePlugin
 				}
 			}
 
+			//null check for playlists to avoid null reference exception
 			if (_cache?.Playlists == null || _cache.Playlists.Count == 0)
 			{
 				return new List<SimplePlaylist>();
