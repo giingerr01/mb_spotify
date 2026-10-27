@@ -4,7 +4,6 @@ using System.Drawing;
 using System.Windows.Forms;
 using System.Net;
 using System.Collections.Generic;
-using System.Security.Cryptography;
 
 namespace MusicBeePlugin
 {
@@ -15,13 +14,11 @@ namespace MusicBeePlugin
         private PluginInfo about = new PluginInfo();
         private Control panel;
         public int panelHeight;
-        private static string _searchTerm, _path;
+        private static string _searchTerm, _path, _legacyTokenPath;
         private static string _clientIdPath;
         private bool _runOnce = true;
         private static bool _authInProgress = false; // guards against triggering SpotifyWebAuth() twice
         Font largeBold, smallRegular, smallBold, iconFont;
-        private RSACryptoServiceProvider _rsaKey;
-        CspParameters _cspParams = new CspParameters();
 
         public PluginInfo Initialise(IntPtr apiInterfacePtr)
         {
@@ -41,10 +38,11 @@ namespace MusicBeePlugin
             about.ReceiveNotifications = (ReceiveNotificationFlags.PlayerEvents | ReceiveNotificationFlags.TagEvents);
             about.ConfigurationPanelHeight = 0;
 
-            _path = mbApiInterface.Setting_GetPersistentStoragePath() + "token.xml";
+            // Tokens are now stored encrypted (DPAPI) in token.dat. token.xml was the old plain-text JSON file;
+            // it is migrated and deleted the first time the token is loaded.
+            _path = mbApiInterface.Setting_GetPersistentStoragePath() + "token.dat";
+            _legacyTokenPath = mbApiInterface.Setting_GetPersistentStoragePath() + "token.xml";
             _clientIdPath = mbApiInterface.Setting_GetPersistentStoragePath() + "clientid.txt";
-            _cspParams.KeyContainerName = "SPOTIFY_XML_ENC_RSA_KEY";
-            _rsaKey = new RSACryptoServiceProvider(_cspParams);
 
             // Each user needs their own Spotify Client ID now (see ClientIdSetupForm) -
             // load whatever was saved from a previous run, if any.
@@ -238,7 +236,7 @@ namespace MusicBeePlugin
 
         public void reAuthSpotify(object sender, EventArgs e)
         {
-            File.Delete(_path);
+            DeleteSavedToken();
             _auth = 0;
             _codeExchanged = false;
 
@@ -268,10 +266,7 @@ namespace MusicBeePlugin
                         _clientID = newClientId;
                         SaveClientId(_clientID);
 
-                        if (File.Exists(_path))
-                        {
-                            File.Delete(_path);
-                        }
+                        DeleteSavedToken();
                         _auth = 0;
                         _codeExchanged = false;
                         _spotify = null;
