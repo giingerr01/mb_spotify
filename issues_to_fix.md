@@ -1,259 +1,126 @@
-# Issues to fix
+# Improvement Report
 
-The following items are based on the recent git history and the current repository state. Items marked with ✅ are already addressed in recent commits, while items marked with ❌ still need attention.
+This report lists practical fixes and improvements for the Spotify plugin within its existing MusicBee plugin setup. It focuses on reliability, security, usability, and maintainability without changing the host requirements.
 
-## Status summary
+## Summary
 
-- ✅ Resolved: The UI no longer appears visually stuck after authentication in the latest working state.
-- ✅ Resolved: Stale asynchronous search results are now prevented from overwriting newer results.
-- ✅ Resolved: Race conditions around Spotify token refresh were addressed with thread-safe handling.
-- ✅ Resolved: Index clamping and invalid search-result handling were improved.
-- ✅ Resolved: Multiple simultaneous authentication attempts are now prevented.
-- ✅ Resolved: Diagnostic logging and library-status checks were added to help debug API and auth issues.
-- ❌ Remaining: Move Spotify client configuration out of source code and into app settings or environment variables.
-- ❌ Remaining: Replace the vendored legacy SDK approach with a maintained dependency or a modern HTTP-based implementation.
-- ❌ Remaining: Modernize the project to a supported .NET target instead of the legacy framework assumptions.
-- ❌ Remaining: Harden token storage and refresh-token handling for better security and reliability.
-- ❌ Remaining: Add automated tests for authentication, token refresh, search, and library checks.
+The plugin already includes several useful safeguards: PKCE authentication, protection against duplicate authentication attempts, stale-search protection, search-result caching, artwork caching, and diagnostic logging.
 
-## Compatibility review
+The most important remaining work is to protect persisted tokens, make authentication and API failures visible and recoverable, and prevent failed library checks from being shown as negative results.
 
-2026-08-10
+## Recommended improvements
 
-## 1. Executive summary
+### 1. Protect saved authentication tokens — High
 
-The project is partially aligned with Spotify’s current authentication model, but it does not fully meet the expectations of a modern, current Spotify integration.
+`SerializeConfig` writes the token response as readable JSON. Its `rsaKey` parameter is not used, and the token file is named `token.xml` despite containing JSON.
 
-What is already good:
-- The plugin uses a PKCE-based authorization flow, which is the recommended approach for desktop/public client applications.
-- The repository contains a fairly complete vendored Spotify Web API client implementation with request models, response models, authenticators, and OAuth helpers.
-- The solution builds successfully under the current environment.
+**Recommended fixes**
+- Protect refresh and access tokens using a Windows user-scoped protection mechanism supported by the existing plugin environment.
+- Write the token file atomically so an interrupted save cannot leave a partial or corrupt token.
+- Use a file name that matches the actual format, or change the format consistently.
+- Remove the saved token when the user explicitly signs out or changes the Spotify app configuration.
 
-What is not fully current:
-- The integration is built around an older, vendored SDK fork and older .NET Framework assumptions rather than a maintained modern SDK stack.
-- The plugin still depends on older desktop-focused patterns such as a manual callback server, legacy token storage, and blocking UI/network behavior.
-- The implementation would need modernization to be considered fully aligned with current Spotify recommendations and resilient to future API/platform changes.
+**Done when:** persisted token contents are not readable as plain text, interrupted writes preserve the previous valid token, and the token file format is unambiguous.
 
-Bottom line:
-- If the goal is “works for the current basic Spotify endpoints and PKCE auth,” the project is close.
-- If the goal is “fully modern, production-ready, and aligned with the latest Spotify platform guidance,” the project needs significant updates.
+### 2. Make authentication state and recovery reliable — High
 
-## 2. Verification evidence
+The authentication flow has several broad catches that silently fall back or write only to the console. The callback handler uses a fixed loopback port, and the received OAuth state is not visibly checked before the authorization code is exchanged.
 
-I verified the current state by building the solution:
+**Recommended fixes**
+- Validate the OAuth state returned by the callback against the state created for the current login attempt.
+- Show actionable status for callback-server startup failure, a port already in use, browser launch failure, denied consent, and token-exchange failure.
+- Ensure the authentication-in-progress flag is cleared for every completion and failure path.
+- Handle an expired or revoked refresh token by clearing the invalid token and prompting the user to authenticate again.
+- Stop and dispose of the callback server after success, failure, or cancellation, and avoid leaving an authentication attempt pending indefinitely.
 
-- Command used: `dotnet build mb_Spotify-Plugin.sln`
-- Result: build succeeded
-- Notes: the build produced many warnings, but no compile errors
+**Done when:** each login attempt either succeeds or returns the panel to a usable state with a clear next step; unrelated or stale callbacks cannot complete the active login.
 
-## 3. Project architecture overview
+### 3. Distinguish API failures from “not found” and “not saved” — High
 
-The repository is a MusicBee plugin that wraps a Spotify client library and uses Spotify OAuth to inspect and update Spotify state for the currently playing track.
+Search/API exceptions currently set `_trackMissing`, which is also used for a genuine no-results response. Library-check helper methods return `false` when a request fails, making an unknown result appear as “not saved” or “not followed.”
 
-### Main layers
+**Recommended fixes**
+- Represent service errors separately from a genuine no-match result.
+- Preserve the last known library/follow status, or show an unknown/error state, when a check request fails.
+- Handle rate limiting and transient network failures with bounded retries where appropriate, respecting Spotify’s retry guidance.
+- Give the user a retry or re-authentication action when the failure is recoverable.
 
-1. MusicBee host integration
-   - [spot_mb/MusicBeeInterface.cs](spot_mb/MusicBeeInterface.cs)
-   - [spot_mb/PanelInterface.cs](spot_mb/PanelInterface.cs)
-   - [spot_mb/SpotifyIntegration.cs](spot_mb/SpotifyIntegration.cs)
+**Done when:** an API or network error is never displayed as a definitive “track not found” or “not saved” result.
 
-   These files make the plugin appear inside MusicBee, render the panel UI, respond to clicks, and initiate Spotify authentication.
+### 4. Improve track matching and search feedback — Medium
 
-2. Authentication and token handling
-   - [spot_mb/SpotifyIntegration.cs](spot_mb/SpotifyIntegration.cs)
-   - [spot_mb/Crypt.cs](spot_mb/Crypt.cs)
-   - [spot_mb/SpotifyAPI.Web.Auth/EmbedIOAuthServer.cs](spot_mb/SpotifyAPI.Web.Auth/EmbedIOAuthServer.cs)
-   - [spot_mb/SpotifyAPI.Web/Authenticators/PKCEAuthenticator.cs](spot_mb/SpotifyAPI.Web/Authenticators/PKCEAuthenticator.cs)
-   - [spot_mb/SpotifyAPI.Web/Clients/OAuthClient.cs](spot_mb/SpotifyAPI.Web/Clients/OAuthClient.cs)
+Track lookup searches using a combined title-and-artist string and uses the first result by default. This can select the wrong version when there are remasters, live recordings, duplicate titles, or multiple artists.
 
-   This layer manages the OAuth redirect flow, token exchange, token refresh, token persistence, and local callback handling.
+**Recommended fixes**
+- Compare candidate results against the MusicBee title and artist tags and prefer the closest match.
+- Provide a way to review or cycle through alternatives when the best match is ambiguous.
+- Clear or replace stale track details consistently when tags are missing or a search returns no results.
+- Make it clear whether the plugin is still searching, has found no result, or encountered an API failure.
 
-3. HTTP and transport layer
-   - [spot_mb/SpotifyAPI.Web/Http/NetHttpClient.cs](spot_mb/SpotifyAPI.Web/Http/NetHttpClient.cs)
-   - [spot_mb/SpotifyAPI.Web/Http/APIConnector.cs](spot_mb/SpotifyAPI.Web/Http/APIConnector.cs)
-   - [spot_mb/SpotifyAPI.Web/Http/Request.cs](spot_mb/SpotifyAPI.Web/Http/Request.cs)
-   - [spot_mb/SpotifyAPI.Web/Http/Response.cs](spot_mb/SpotifyAPI.Web/Http/Response.cs)
+**Done when:** common duplicate/version cases are less likely to select the wrong Spotify track, and the panel communicates search outcomes clearly.
 
-   This layer builds HTTP requests, applies authentication headers, sends requests, and processes responses.
+### 5. Reduce repeated Spotify requests — Medium
 
-4. Spotify client surface
-   - [spot_mb/SpotifyAPI.Web/Clients/SpotifyClient.cs](spot_mb/SpotifyAPI.Web/Clients/SpotifyClient.cs)
-   - [spot_mb/SpotifyAPI.Web/Clients/SearchClient.cs](spot_mb/SpotifyAPI.Web/Clients/SearchClient.cs)
-   - [spot_mb/SpotifyAPI.Web/Clients/LibraryClient.cs](spot_mb/SpotifyAPI.Web/Clients/LibraryClient.cs)
-   - [spot_mb/SpotifyAPI.Web/Clients/FollowClient.cs](spot_mb/SpotifyAPI.Web/Clients/FollowClient.cs)
-   - [spot_mb/SpotifyAPI.Web/Clients/UserProfileClient.cs](spot_mb/SpotifyAPI.Web/Clients/UserProfileClient.cs)
+The plugin caches search responses, but a successful track search also performs separate track, album, and artist status checks. Failures in those checks are currently folded into a false result.
 
-   These client classes expose the Spotify API operations used by the plugin.
+**Recommended fixes**
+- Cache library/follow status for the current track and invalidate it after the user saves/removes a track, saves/removes an album, or follows/unfollows an artist.
+- Avoid repeating the same checks when the same track is already displayed and no user action changed its status.
+- Keep cache limits and eviction behavior predictable; the current concurrent dictionary removes an arbitrary key rather than the least-recently-used entry.
 
-5. Model layer
-   - [spot_mb/SpotifyAPI.Web/Models](spot_mb/SpotifyAPI.Web/Models)
+**Done when:** repeated notifications for the same track do not trigger unnecessary status requests, and user actions immediately update the displayed status.
 
-   This contains request and response models for Spotify endpoints, including auth, search, library, player, and follow operations.
+### 6. Keep UI updates safe and predictable — Medium
 
-## 4. File-by-file summary
+Authentication is started from the panel paint handler, and several asynchronous event paths update controls or invoke MusicBee APIs. This makes UI lifecycle issues harder to reason about and can leave the panel stale if a control is disposed during an operation.
 
-### Core plugin files
+**Recommended fixes**
+- Start authentication from an explicit user action or initialization event rather than from painting.
+- Route UI changes through one UI-thread-safe refresh helper and check that the panel is still available before posting updates.
+- Replace `async void` methods where possible with `Task`-returning methods; keep `async void` only where required by an event-handler signature and handle exceptions there.
+- Show a busy/working state during authentication and long API operations, and prevent duplicate clicks while an action is in progress.
 
-- [spot_mb/SpotifyIntegration.cs](spot_mb/SpotifyIntegration.cs)
-  - Main integration logic.
-  - Handles auth startup, PKCE login, token storage, and calls to Spotify endpoints.
-  - This is the key file that determines whether the plugin works with the current Spotify flow.
+**Done when:** repainting the panel has no network or authentication side effects, and asynchronous operations cannot update a disposed panel.
 
-- [spot_mb/PanelInterface.cs](spot_mb/PanelInterface.cs)
-  - Handles the MusicBee panel UI, drawing, click handling, and re-authentication.
-  - It is currently tightly coupled to the auth flow and uses UI-thread patterns that could be more robust.
+### 7. Clean up UI and image resources — Low
 
-- [spot_mb/MusicBeeInterface.cs](spot_mb/MusicBeeInterface.cs)
-  - Defines the MusicBee API interface bridge.
-  - This is how the plugin talks to MusicBee.
+Several `Font` instances are created during panel drawing and are not disposed. The cached artwork bitmap is replaced safely, but it should also be released when the plugin is closed or unloaded.
 
-- [spot_mb/Crypt.cs](spot_mb/Crypt.cs)
-  - Provides XML encryption/decryption helpers.
-  - Useful for token protection, but the implementation is older and should be simplified or modernized.
+**Recommended fixes**
+- Reuse fonts created for the panel lifetime and dispose of them when the panel/plugin is closed.
+- Dispose of the cached artwork bitmap and other owned graphics resources during cleanup.
+- Remove unused fields and imports after confirming they are no longer needed.
 
-### OAuth and auth server files
+**Done when:** repeated panel repainting does not continually allocate new fonts, and plugin shutdown releases its owned graphics resources.
 
-- [spot_mb/SpotifyAPI.Web.Auth/EmbedIOAuthServer.cs](spot_mb/SpotifyAPI.Web.Auth/EmbedIOAuthServer.cs)
-  - Local callback server for OAuth redirects.
-  - Good for a desktop app, but should be hardened for modern redirect handling and error cases.
+### 8. Add focused regression tests — Medium
 
-- [spot_mb/SpotifyAPI.Web.Auth/BrowserUtil.cs](spot_mb/SpotifyAPI.Web.Auth/BrowserUtil.cs)
-  - Opens the browser to start the OAuth flow.
+There are no obvious automated tests covering the key behaviors identified in this report.
 
-- [spot_mb/SpotifyAPI.Web.Auth/IAuthServer.cs](spot_mb/SpotifyAPI.Web.Auth/IAuthServer.cs)
-  - Auth server abstraction.
-
-### Spotify client core
-
-- [spot_mb/SpotifyAPI.Web/Clients/OAuthClient.cs](spot_mb/SpotifyAPI.Web/Clients/OAuthClient.cs)
-  - Implements token exchange and refresh requests.
-  - This is central to Spotify compatibility.
-
-- [spot_mb/SpotifyAPI.Web/Clients/SpotifyClientConfig.cs](spot_mb/SpotifyAPI.Web/Clients/SpotifyClientConfig.cs)
-  - Configures the client with authenticator, serializer, HTTP client, and paginator.
-
-- [spot_mb/SpotifyAPI.Web/Clients/SpotifyClient.cs](spot_mb/SpotifyAPI.Web/Clients/SpotifyClient.cs)
-  - The main Spotify client facade.
-
-- [spot_mb/SpotifyAPI.Web/Authenticators/PKCEAuthenticator.cs](spot_mb/SpotifyAPI.Web/Authenticators/PKCEAuthenticator.cs)
-  - Handles PKCE token refresh behavior.
-
-- [spot_mb/SpotifyAPI.Web/Authenticators/AuthorizationCodeAuthenticator.cs](spot_mb/SpotifyAPI.Web/Authenticators/AuthorizationCodeAuthenticator.cs)
-  - Supports authorization-code-based token management.
-
-- [spot_mb/SpotifyAPI.Web/Authenticators/ClientCredentialsAuthenticator.cs](spot_mb/SpotifyAPI.Web/Authenticators/ClientCredentialsAuthenticator.cs)
-  - Supports client-credentials flow.
-
-### HTTP and serialization
-
-- [spot_mb/SpotifyAPI.Web/Http/NetHttpClient.cs](spot_mb/SpotifyAPI.Web/Http/NetHttpClient.cs)
-  - Implements request sending over HttpClient.
-  - This is an important compatibility point because modern apps require robust request handling and fewer legacy assumptions.
-
-- [spot_mb/SpotifyAPI.Web/Http/APIConnector.cs](spot_mb/SpotifyAPI.Web/Http/APIConnector.cs)
-  - Applies auth and dispatches requests.
-
-- [spot_mb/SpotifyAPI.Web/Http/NewtonsoftJSONSerializer.cs](spot_mb/SpotifyAPI.Web/Http/NewtonsoftJSONSerializer.cs)
-  - Serializes/deserializes JSON.
-
-### Models and request builders
-
-- [spot_mb/SpotifyAPI.Web/Models](spot_mb/SpotifyAPI.Web/Models)
-  - Includes request model classes and response models for albums, artists, playlists, tracks, follow requests, search requests, and token responses.
-
-## 5. Compatibility with current Spotify guidance
-
-### What already fits current Spotify guidance
-
-- PKCE flow is used for user-authenticated access.
-- The project requests scopes for library and follow operations, which are valid Spotify scopes.
-- The code uses the OAuth token endpoint and uses a local redirect URI callback, which is the right general direction for a desktop-style app.
-
-### What is still weak or outdated
-
-1. Hard-coded client configuration
-   - The plugin contains a hard-coded Spotify client ID in [spot_mb/SpotifyIntegration.cs](spot_mb/SpotifyIntegration.cs).
-   - In modern integrations, this should be externalized and managed through configuration or a secure app settings layer.
-
-2. Callback URI handling
-   - The callback is implemented with a local loopback server and a fixed redirect URI.
-   - That is acceptable for desktop apps, but the redirect URI must be registered exactly in the Spotify Developer Dashboard and the code should validate it carefully.
-
-3. Token storage and security
-   - Token persistence is done through file-based serialization and older RSA-based cryptography helpers.
-   - Modern integrations should prefer a more durable and secure storage mechanism and a clearer refresh-token lifecycle.
-
-4. Dependency maturity
-   - The project uses a vendored SDK copy rather than a maintained current package.
-   - That means the integration may fall behind current Spotify API models, new endpoint semantics, or libraries that have had bug fixes and security improvements.
-
-5. Modern .NET compatibility
-   - The plugin targets older .NET Framework assumptions.
-   - The project builds, but it is not aligned with the modern .NET ecosystem that most current desktop integrations would use today.
-
-## 6. Does it meet the latest Spotify API version?
-
-### Short answer
-
-Partially.
-
-### More detailed answer
-
-The project is not fully “latest-Spotify-API-ready” in a modern sense. It has the core pieces needed for authentication and several API operations, but it is still built around older conventions and a legacy SDK approach.
-
-It should be considered:
-- Functionally adequate for a small, internal, legacy MusicBee plugin
-- Not fully modernized for current Spotify platform expectations
-- In need of updates before it can be treated as a robust long-term integration
-
-## 7. What needs to change to meet the latest Spotify update
-
-### Priority 1: modernize the auth layer
-
-- Move the Spotify client configuration out of code and into configuration.
-- Keep PKCE, but make the redirect URI and state handling explicit and well-validated.
-- Ensure the app uses a registered redirect URI that exactly matches the Spotify Developer Dashboard configuration.
-- Improve refresh-token handling and re-authentication logic.
-
-### Priority 2: replace the old SDK strategy
-
-- Stop depending on the bundled legacy SDK copy as the main integration path.
-- Prefer a maintained SDK or a more direct modern HTTP-based implementation with current Spotify API models.
-- Review endpoint usage for any deprecations or changed response structures.
-
-### Priority 3: modernize the runtime stack
-
-- Move away from .NET Framework 4.6.2 and legacy Windows Forms assumptions where possible.
-- Upgrade to a supported .NET target such as .NET 8 or later if the plugin host allows it.
-- Replace old blocking UI/network code with async-safe patterns.
-
-### Priority 4: harden security and reliability
-
-- Store tokens in a more robust secure location.
-- Handle token expiry and `invalid_grant` failures gracefully.
-- Add better error handling and logging around OAuth callbacks and API failures.
-- Make the UI less fragile when auth is slow or fails.
-
-### Priority 5: validate endpoint coverage
-
-- Confirm that each current endpoint used by the plugin still matches the latest API contract.
-- Add tests for auth success, token refresh, search, library check, and follow/check flows.
-
-## 8. Recommended migration plan
-
-1. Keep the existing plugin shape and feature set, but replace the auth and token-management path with a modern PKCE implementation.
-2. Move all Spotify configuration to app settings or environment variables.
-3. Replace the vendored SDK dependency with a maintained dependency or a thin modern wrapper.
-4. Rework the UI layer so network calls are asynchronous and do not block the MusicBee host.
-5. Add tests around auth, refresh, and API calls.
-6. Rebuild and verify the plugin after each major step.
-
-## 9. Final assessment
-
-This project is a workable legacy integration with a solid base, but it is not yet fully aligned with the latest Spotify API and platform expectations. The biggest gaps are in modernization, security, token lifecycle handling, and dependency strategy.
-
-If the goal is to make it truly current and future-proof, the most important changes are:
-- modernize OAuth and token management,
-- replace the legacy vendored SDK strategy,
-- move to a supported .NET target,
-- and harden the plugin around current Spotify guidance.
+**Recommended tests**
+- Token save/load, token protection, and recovery from a corrupt or incomplete token file.
+- OAuth callback state validation and cleanup after success, failure, and cancellation.
+- Search results for no match, ambiguous versions, and stale responses arriving out of order.
+- Library/follow check failures remaining distinct from a legitimate negative result.
+- Cache invalidation after save/remove/follow actions.
+
+**Done when:** the core state transitions and failure cases can be verified without relying on manual Spotify account testing.
+
+## Suggested order of work
+
+1. Protect and safely persist tokens.
+2. Harden OAuth callback validation and ensure authentication attempts always finish cleanly.
+3. Separate API failures from negative search/library results.
+4. Improve track matching and user feedback.
+5. Reduce redundant API requests and add focused regression tests.
+6. Address UI lifecycle and resource cleanup.
+
+## Already in place
+
+- PKCE-based authorization.
+- A guard against starting multiple authentication attempts simultaneously.
+- Protection against stale search results replacing newer results.
+- Search-response and artwork caching.
+- Diagnostic logging for several Spotify API and artwork failures.
+
+These are useful foundations; the recommendations above target remaining behavior and reliability gaps rather than replacing those existing safeguards.
