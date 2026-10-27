@@ -882,7 +882,7 @@ namespace MusicBeePlugin
 		{
 			await _spotify.UserProfile.Current().ConfigureAwait(false);
 
-			var token = DeserializeConfig(_path, _rsaKey);
+			var token = _latestToken ?? LoadToken(); // kept current by the authenticator's TokenRefreshed event
 
 			if (token == null || string.IsNullOrWhiteSpace(token.AccessToken))
 			{
