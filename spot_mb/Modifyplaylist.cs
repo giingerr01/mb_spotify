@@ -265,7 +265,7 @@ namespace MusicBeePlugin
 			var fg = panel.ForeColor;
 			Rectangle backButton = SliderBackButtonBounds(bounds);
 			g.DrawRectangle(GetPen(Color.FromArgb(60, fg)), backButton);
-			TextRenderer.DrawText(g, "← Back", smallRegular, backButton, fg,
+			TextRenderer.DrawText(g, "Back", smallRegular, backButton, fg,
 				TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
 		}
 
