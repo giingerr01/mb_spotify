@@ -63,41 +63,144 @@ namespace MusicBeePlugin
             }
         }
 
-        public void SerializeConfig(PKCETokenResponse data, string path, RSACryptoServiceProvider rsaKey)
+        // Latest token we know about (loaded, newly issued, or refreshed). Lets other code get the current
+        // access token without re-reading and decrypting the file.
+        private static PKCETokenResponse _latestToken;
+
+        private bool SaveToken(PKCETokenResponse token)
         {
+            if (token == null) return false;
+
+            _latestToken = token;
+
             try
             {
-                if (data == null) return;
-
-                // Serialize to json
-                string json = JsonConvert.SerializeObject(data, Newtonsoft.Json.Formatting.Indented);
-                using (StreamWriter file = new StreamWriter(path, false))
-                {
-                    file.Write(json);
-                }
+                TokenStore.Save(_path, JsonConvert.SerializeObject(token));
+                return true;
             }
             catch (Exception e)
             {
-                System.Windows.Forms.MessageBox.Show("Error saving token file:\n" + e.Message, "Spotify Plugin Error");
+                // May run on a background thread (token refresh), so trace instead of showing a dialog.
+                mbApiInterface.MB_Trace("SaveToken failed: " + e.GetType().Name + " - " + e.Message);
+                return false;
             }
         }
 
-        public PKCETokenResponse DeserializeConfig(string path, RSACryptoServiceProvider rsaKey)
+        private PKCETokenResponse LoadToken()
         {
             try
             {
-                if (File.Exists(path))
+                MigrateLegacyToken();
+
+                var status = TokenStore.TryLoad(_path, out string json, out string error);
+
+                if (status == TokenLoadStatus.Missing)
                 {
-                    // Read and derialiialize json token
-                    string json = File.ReadAllText(path);
-                    return JsonConvert.DeserializeObject<PKCETokenResponse>(json);
+                    return null;
                 }
+
+                if (status == TokenLoadStatus.IoError)
+                {
+                    // Possibly just locked right now; keep the file and let the caller fall back to sign-in.
+                    mbApiInterface.MB_Trace("LoadToken: couldn't read token file: " + error);
+                    return null;
+                }
+
+                if (status == TokenLoadStatus.Corrupt)
+                {
+                    mbApiInterface.MB_Trace("LoadToken: token file unreadable, removing it: " + error);
+                    TokenStore.Delete(_path);
+                    return null;
+                }
+
+                PKCETokenResponse token = null;
+                try
+                {
+                    token = JsonConvert.DeserializeObject<PKCETokenResponse>(json);
+                }
+                catch (JsonException)
+                {
+                }
+
+                if (token == null || string.IsNullOrWhiteSpace(token.RefreshToken))
+                {
+                    mbApiInterface.MB_Trace("LoadToken: token file has no usable token, removing it.");
+                    TokenStore.Delete(_path);
+                    return null;
+                }
+
+                _latestToken = token;
+                return token;
             }
             catch (Exception e)
             {
-                System.Windows.Forms.MessageBox.Show("Error reading token file:\n" + e.Message, "Spotify Plugin Error");
+                mbApiInterface.MB_Trace("LoadToken failed: " + e.GetType().Name + " - " + e.Message);
+                return null;
             }
-            return null;
+        }
+
+        // One-time move from the old plain-text token.xml to the encrypted token.dat.
+        private void MigrateLegacyToken()
+        {
+            if (string.IsNullOrEmpty(_legacyTokenPath) || !File.Exists(_legacyTokenPath))
+            {
+                return;
+            }
+
+            try
+            {
+                if (!File.Exists(_path))
+                {
+                    string json = File.ReadAllText(_legacyTokenPath);
+
+                    PKCETokenResponse legacy = null;
+                    try
+                    {
+                        legacy = JsonConvert.DeserializeObject<PKCETokenResponse>(json);
+                    }
+                    catch (JsonException)
+                    {
+                    }
+
+                    if (legacy != null && !string.IsNullOrWhiteSpace(legacy.RefreshToken))
+                    {
+                        TokenStore.Save(_path, json);
+                    }
+                }
+
+                // Only reached if the encrypted copy was written (or wasn't needed), so the plain-text file goes away.
+                File.Delete(_legacyTokenPath);
+            }
+            catch (Exception e)
+            {
+                // Leave the old file in place and retry next time rather than lose the login.
+                mbApiInterface.MB_Trace("MigrateLegacyToken failed: " + e.GetType().Name + " - " + e.Message);
+            }
+        }
+
+        private void DeleteSavedToken()
+        {
+            _latestToken = null;
+
+            bool ok = TokenStore.Delete(_path);
+            ok &= TokenStore.Delete(_legacyTokenPath);
+
+            if (!ok)
+            {
+                mbApiInterface.MB_Trace("DeleteSavedToken: couldn't remove one or more token files.");
+            }
+        }
+
+        private SpotifyClient CreateSpotifyClient(PKCETokenResponse token)
+        {
+            var authenticator = new PKCEAuthenticator(_clientID, token, "http://127.0.0.1:5000/callback");
+
+            // The authenticator refreshes the access token itself; persist every refreshed token (encrypted).
+            authenticator.TokenRefreshed += (sender, refreshed) => SaveToken(refreshed);
+
+            var config = SpotifyClientConfig.CreateDefault()
+                .WithAuthenticator(authenticator);
+            return new SpotifyClient(config);
         }
 
         async void SpotifyWebAuth()
@@ -113,16 +216,11 @@ namespace MusicBeePlugin
 
             try
             {
-                if (File.Exists(_path))
                 {
-                    var token_response = DeserializeConfig(_path, _rsaKey);
+                    var token_response = LoadToken();
                     if (token_response != null)
                     {
-                        var authenticator = new PKCEAuthenticator(_clientID, token_response, _path);
-
-                        var config = SpotifyClientConfig.CreateDefault()
-                            .WithAuthenticator(authenticator);
-                        _spotify = new SpotifyClient(config);
+                        _spotify = CreateSpotifyClient(token_response);
 
                         // Initialize cache manager
                         _cacheManager = new PlaylistCacheManager(_spotify);
@@ -200,19 +298,21 @@ namespace MusicBeePlugin
                             new PKCETokenRequest(_clientID, response.Code, server.BaseUri, verifier)
                         );
 
-                        var authenticator = new PKCEAuthenticator(_clientID, initialResponse, _path);
-
-                        var config = SpotifyClientConfig.CreateDefault()
-                            .WithAuthenticator(authenticator);
-                        _spotify = new SpotifyClient(config);
+                        _spotify = CreateSpotifyClient(initialResponse);
 
                         // Initialize cache manager
                         _cacheManager = new PlaylistCacheManager(_spotify);
 
                         var me = await _spotify.UserProfile.Current();
 
-                        // Save JSON token cleanly
-                        SerializeConfig(initialResponse, _path, _rsaKey);
+                        // Save the token encrypted; tell the user if it couldn't be persisted.
+                        if (!SaveToken(initialResponse))
+                        {
+                            panel.BeginInvoke((Action)(() =>
+                                MessageBox.Show("Signed in to Spotify, but the login couldn't be saved. " +
+                                                "You'll need to sign in again next time MusicBee starts.",
+                                                "Spotify Plugin")));
+                        }
                         _auth = 1;
 
                         _searchTerm = mbApiInterface.NowPlaying_GetFileTag(MetaDataType.TrackTitle)
